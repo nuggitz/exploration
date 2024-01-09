@@ -1,0 +1,497 @@
+<!-- livebook:{"persist_outputs":true} -->
+
+# kNN
+
+```elixir
+Mix.install([
+  {:scholar, "~> 0.2"},
+  {:explorer, "~> 0.7"},
+  {:exla, "~> 0.6"},
+  {:nx, "~> 0.6", override: true},
+  {:req, "~> 0.4"},
+  {:kino_vega_lite, "~> 0.1"},
+  {:kino, "~> 0.12"},
+  {:scidata, "~> 0.1"},
+  {:kino_explorer, "~> 0.1"}
+])
+```
+
+## Setup
+
+```elixir
+require Explorer.DataFrame, as: DF
+require Explorer.Series, as: S
+require Explorer.Query, as: Q
+alias Scholar.Neighbors.KNearestNeighbors, as: KNN
+alias Scholar.Metrics.Classification
+alias Scholar.Metrics.Regression
+alias VegaLite, as: VL
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+VegaLite
+```
+
+```elixir
+Nx.global_default_backend(EXLA.Backend)
+seed = 24
+key = Nx.Random.key(seed)
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+
+13:23:47.778 [info] TfrtCpuClient created.
+
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+#Nx.Tensor<
+  u32[2]
+  EXLA.Backend<host:0, 0.3752721453.2026242072.82054>
+  [0, 24]
+>
+```
+
+## Data Exploration - Classification
+
+```elixir
+# Split into train and test datasets
+df = Explorer.Datasets.iris() |> DF.shuffle(seed: seed)
+train_portion = ceil(DF.n_rows(df) * 0.8)
+df_train = DF.head(df, train_portion)
+df_test = DF.tail(df, DF.n_rows(df) - train_portion)
+
+x =
+  df
+  |> DF.discard("species")
+  |> Nx.stack(axis: 1)
+
+y =
+  df[["species"]]
+  |> DF.dummies(["species"])
+  |> Nx.stack(axis: 1)
+  |> Nx.argmax(axis: 1)
+
+{train_x, test_x} = Nx.split(x, train_portion)
+{train_y, test_y} = Nx.split(y, train_portion)
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+{#Nx.Tensor<
+   s64[120]
+   EXLA.Backend<host:0, 0.3752721453.2026242072.82174>
+   [0, 1, 1, 2, 1, 1, 2, 2, 0, 2, 2, 2, 2, 1, 1, 1, 0, 0, 0, 1, 2, 1, 1, 0, 2, 2, 1, 1, 2, 0, 1, 0, 1, 2, 2, 0, 2, 2, 1, 0, 2, 0, 2, 0, 1, 2, 0, 2, 0, ...]
+ >,
+ #Nx.Tensor<
+   s64[30]
+   EXLA.Backend<host:0, 0.3752721453.2026242072.82175>
+   [2, 1, 1, 0, 0, 1, 2, 1, 2, 2, 1, 0, 1, 0, 1, 1, 2, 1, 1, 1, 2, 0, 0, 1, 2, 1, 0, 0, 2, 0]
+ >}
+```
+
+```elixir
+df_train
+|> DF.group_by("species")
+|> DF.summarise(
+  petal_length: mean(petal_length),
+  petal_width: mean(petal_width),
+  sepal_length: mean(sepal_length),
+  sepal_width: mean(sepal_width)
+)
+```
+
+<!-- livebook:{"output":true} -->
+
+```text
+#Explorer.DataFrame<
+  Polars[3 x 5]
+  species string ["Iris-setosa", "Iris-virginica", "Iris-versicolor"]
+  petal_length f64 [1.475609756097561, 5.535135135135133, 4.25]
+  petal_width f64 [0.25121951219512195, 2.0405405405405403, 1.3190476190476186]
+  sepal_length f64 [5.014634146341463, 6.537837837837837, 5.92142857142857]
+  sepal_width f64 [3.439024390243902, 2.9891891891891884, 2.754761904761905]
+>
+```
+
+```elixir
+VL.new(title: [text: "Petal Size Comparisons"], height: 600, width: 600, anchor: :middle)
+|> VL.data_from_values(df_train)
+|> VL.mark(:point)
+|> VL.encode_field(:x, "petal_width", type: :quantitative, title: "Petal Width")
+|> VL.encode_field(:y, "petal_length", type: :quantitative, title: "Petal Length")
+|> VL.encode_field(:color, "species", type: :nominal)
+|> VL.encode_field(:shape, "species", type: :nominal)
+```
+
+<!-- livebook:{"output":true} -->
+
+```vega-lite
+{"$schema":"https://vega.github.io/schema/vega-lite/v5.json","anchor":"middle","data":{"values":[{"petal_length":1.2,"petal_width":0.2,"sepal_length":5.8,"sepal_width":4.0,"species":"Iris-setosa"},{"petal_length":5.1,"petal_width":2.4,"sepal_length":5.8,"sepal_width":2.8,"species":"Iris-virginica"},{"petal_length":4.5,"petal_width":1.7,"sepal_length":4.9,"sepal_width":2.5,"species":"Iris-virginica"},{"petal_length":4.5,"petal_width":1.5,"sepal_length":6.2,"sepal_width":2.2,"species":"Iris-versicolor"},{"petal_length":6.0,"petal_width":1.8,"sepal_length":7.2,"sepal_width":3.2,"species":"Iris-virginica"},{"petal_length":5.2,"petal_width":2.0,"sepal_length":6.5,"sepal_width":3.0,"species":"Iris-virginica"},{"petal_length":4.9,"petal_width":1.5,"sepal_length":6.3,"sepal_width":2.5,"species":"Iris-versicolor"},{"petal_length":3.8,"petal_width":1.1,"sepal_length":5.5,"sepal_width":2.4,"species":"Iris-versicolor"},{"petal_length":1.5,"petal_width":0.1,"sepal_length":5.2,"sepal_width":4.1,"species":"Iris-setosa"},{"petal_length":4.4,"petal_width":1.3,"sepal_length":6.3,"sepal_width":2.3,"species":"Iris-versicolor"},{"petal_length":4.8,"petal_width":1.4,"sepal_length":6.8,"sepal_width":2.8,"species":"Iris-versicolor"},{"petal_length":4.4,"petal_width":1.2,"sepal_length":5.5,"sepal_width":2.6,"species":"Iris-versicolor"},{"petal_length":4.5,"petal_width":1.5,"sepal_length":6.4,"sepal_width":3.2,"species":"Iris-versicolor"},{"petal_length":5.4,"petal_width":2.3,"sepal_length":6.2,"sepal_width":3.4,"species":"Iris-virginica"},{"petal_length":5.9,"petal_width":2.3,"sepal_length":6.8,"sepal_width":3.2,"species":"Iris-virginica"},{"petal_length":4.9,"petal_width":2.0,"sepal_length":5.6,"sepal_width":2.8,"species":"Iris-virginica"},{"petal_length":1.5,"petal_width":0.2,"sepal_length":4.6,"sepal_width":3.1,"species":"Iris-setosa"},{"petal_length":1.3,"petal_width":0.3,"sepal_length":4.5,"sepal_width":2.3,"species":"Iris-setosa"},{"petal_length":1.3,"petal_width":0.3,"sepal_length":5.0,"sepal_width":3.5,"species":"Iris-setosa"},{"petal_length":5.8,"petal_width":2.2,"sepal_length":6.5,"sepal_width":3.0,"species":"Iris-virginica"},{"petal_length":3.6,"petal_width":1.3,"sepal_length":5.6,"sepal_width":2.9,"species":"Iris-versicolor"},{"petal_length":4.9,"petal_width":1.8,"sepal_length":6.1,"sepal_width":3.0,"species":"Iris-virginica"},{"petal_length":5.9,"petal_width":2.1,"sepal_length":7.1,"sepal_width":3.0,"species":"Iris-virginica"},{"petal_length":1.5,"petal_width":0.2,"sepal_length":5.0,"sepal_width":3.4,"species":"Iris-setosa"},{"petal_length":4.5,"petal_width":1.5,"sepal_length":5.4,"sepal_width":3.0,"species":"Iris-versicolor"},{"petal_length":4.0,"petal_width":1.3,"sepal_length":5.5,"sepal_width":2.5,"species":"Iris-versicolor"},{"petal_length":5.0,"petal_width":1.5,"sepal_length":6.0,"sepal_width":2.2,"species":"Iris-virginica"},{"petal_length":6.7,"petal_width":2.2,"sepal_length":7.7,"sepal_width":3.8,"species":"Iris-virginica"},{"petal_length":4.6,"petal_width":1.4,"sepal_length":6.1,"sepal_width":3.0,"species":"Iris-versicolor"},{"petal_length":1.5,"petal_width":0.1,"sepal_length":4.9,"sepal_width":3.1,"species":"Iris-setosa"},{"petal_length":5.6,"petal_width":2.2,"sepal_length":6.4,"sepal_width":2.8,"species":"Iris-virginica"},{"petal_length":1.5,"petal_width":0.4,"sepal_length":5.1,"sepal_width":3.7,"species":"Iris-setosa"},{"petal_length":5.6,"petal_width":1.8,"sepal_length":6.3,"sepal_width":2.9,"species":"Iris-virginica"},{"petal_length":3.7,"petal_width":1.0,"sepal_length":5.5,"sepal_width":2.4,"species":"Iris-versicolor"},{"petal_length":4.0,"petal_width":1.0,"sepal_length":6.0,"sepal_width":2.2,"species":"Iris-versicolor"},{"petal_length":1.6,"petal_width":0.6,"sepal_length":5.0,"sepal_width":3.5,"species":"Iris-setosa"},{"petal_length":4.0,"petal_width":1.3,"sepal_length":6.1,"sepal_width":2.8,"species":"Iris-versicolor"},{"petal_length":4.6,"petal_width":1.5,"sepal_length":6.5,"sepal_width":2.8,"species":"Iris-versicolor"},{"petal_length":5.7,"petal_width":2.3,"sepal_length":6.9,"sepal_width":3.2,"species":"Iris-virginica"},{"petal_length":1.7,"petal_width":0.4,"sepal_length":5.4,"sepal_width":3.9,"species":"Iris-setosa"},{"petal_length":4.9,"petal_width":1.5,"sepal_length":6.9,"sepal_width":3.1,"species":"Iris-versicolor"},{"petal_length":1.6,"petal_width":0.2,"sepal_length":5.0,"sepal_width":3.0,"species":"Iris-setosa"},{"petal_length":4.7,"petal_width":1.6,"sepal_length":6.3,"sepal_width":3.3,"species":"Iris-versicolor"},{"petal_length":1.5,"petal_width":0.3,"sepal_length":5.1,"sepal_width":3.8,"species":"Iris-setosa"},{"petal_length":5.5,"petal_width":2.1,"sepal_length":6.8,"sepal_width":3.0,"species":"Iris-virginica"},{"petal_length":3.5,"petal_width":1.0,"sepal_length":5.0,"sepal_width":2.0,"species":"Iris-versicolor"},{"petal_length":1.4,"petal_width":0.2,"sepal_length":5.5,"sepal_width":4.2,"species":"Iris-setosa"},{"petal_length":4.3,"petal_width":1.3,"sepal_length":6.4,"sepal_width":2.9,"species":"Iris-versicolor"},{"petal_length":1.4,"petal_width":0.2,"sepal_length":5.0,"sepal_width":3.6,"species":"Iris-setosa"},{"petal_length":1.6,"petal_width":0.2,"sepal_length":4.8,"sepal_width":3.4,"species":"Iris-setosa"},{"petal_length":6.1,"petal_width":1.9,"sepal_length":7.4,"sepal_width":2.8,"species":"Iris-virginica"},{"petal_length":3.5,"petal_width":1.0,"sepal_length":5.7,"sepal_width":2.6,"species":"Iris-versicolor"},{"petal_length":1.3,"petal_width":0.2,"sepal_length":4.7,"sepal_width":3.2,"species":"Iris-setosa"},{"petal_length":4.8,"petal_width":1.8,"sepal_length":6.0,"sepal_width":3.0,"species":"Iris-virginica"},{"petal_length":5.0,"petal_width":2.0,"sepal_length":5.7,"sepal_width":2.5,"species":"Iris-virginica"},{"petal_length":1.7,"petal_width":0.3,"sepal_length":5.7,"sepal_width":3.8,"species":"Iris-setosa"},{"petal_length":4.0,"petal_width":1.2,"sepal_length":5.8,"sepal_width":2.6,"species":"Iris-versicolor"},{"petal_length":4.4,"petal_width":1.4,"sepal_length":6.7,"sepal_width":3.1,"species":"Iris-versicolor"},{"petal_length":5.3,"petal_width":2.3,"sepal_length":6.4,"sepal_width":3.2,"species":"Iris-virginica"},{"petal_length":5.1,"petal_width":2.0,"sepal_length":6.5,"sepal_width":3.2,"species":"Iris-virginica"},{"petal_length":1.3,"petal_width":0.2,"sepal_length":5.5,"sepal_width":3.5,"species":"Iris-setosa"},{"petal_length":1.9,"petal_width":0.2,"sepal_length":4.8,"sepal_width":3.4,"species":"Iris-setosa"},{"petal_length":5.1,"petal_width":1.8,"sepal_length":5.9,"sepal_width":3.0,"species":"Iris-virginica"},{"petal_length":6.7,"petal_width":2.0,"sepal_length":7.7,"sepal_width":2.8,"species":"Iris-virginica"},{"petal_length":4.6,"petal_width":1.3,"sepal_length":6.6,"sepal_width":2.9,"species":"Iris-versicolor"},{"petal_length":1.9,"petal_width":0.4,"sepal_length":5.1,"sepal_width":3.8,"species":"Iris-setosa"},{"petal_length":6.9,"petal_width":2.3,"sepal_length":7.7,"sepal_width":2.6,"species":"Iris-virginica"},{"petal_length":4.8,"petal_width":1.8,"sepal_length":6.2,"sepal_width":2.8,"species":"Iris-virginica"},{"petal_length":4.2,"petal_width":1.2,"sepal_length":5.7,"sepal_width":3.0,"species":"Iris-versicolor"},{"petal_length":3.3,"petal_width":1.0,"sepal_length":4.9,"sepal_width":2.4,"species":"Iris-versicolor"},{"petal_length":4.9,"petal_width":1.8,"sepal_length":6.3,"sepal_width":2.7,"species":"Iris-virginica"},{"petal_length":6.1,"petal_width":2.5,"sepal_length":7.2,"sepal_width":3.6,"species":"Iris-virginica"},{"petal_length":5.6,"petal_width":2.4,"sepal_length":6.7,"sepal_width":3.1,"species":"Iris-virginica"},{"petal_length":5.4,"petal_width":2.1,"sepal_length":6.9,"sepal_width":3.1,"species":"Iris-virginica"},{"petal_length":4.1,"petal_width":1.3,"sepal_length":5.6,"sepal_width":3.0,"species":"Iris-versicolor"},{"petal_length":1.5,"petal_width":0.2,"sepal_length":5.2,"sepal_width":3.5,"species":"Iris-setosa"},{"petal_length":5.1,"petal_width":1.5,"sepal_length":6.3,"sepal_width":2.8,"species":"Iris-virginica"},{"petal_length":4.7,"petal_width":1.2,"sepal_length":6.1,"sepal_width":2.8,"species":"Iris-versicolor"},{"petal_length":4.2,"petal_width":1.5,"sepal_length":5.9,"sepal_width":3.0,"species":"Iris-versicolor"},{"petal_length":1.7,"petal_width":0.5,"sepal_length":5.1,"sepal_width":3.3,"species":"Iris-setosa"},{"petal_length":3.9,"petal_width":1.4,"sepal_length":5.2,"sepal_width":2.7,"species":"Iris-versicolor"},{"petal_length":1.0,"petal_width":0.2,"sepal_length":4.6,"sepal_width":3.6,"species":"Iris-setosa"},{"petal_length":1.7,"petal_width":0.2,"sepal_length":5.4,"sepal_width":3.4,"species":"Iris-setosa"},{"petal_length":1.5,"petal_width":0.4,"sepal_length":5.4,"sepal_width":3.4,"species":"Iris-setosa"},{"petal_length":4.5,"petal_width":1.5,"sepal_length":6.0,"sepal_width":2.9,"species":"Iris-versicolor"},{"petal_length":4.1,"petal_width":1.3,"sepal_length":5.7,"sepal_width":2.8,"species":"Iris-versicolor"},{"petal_length":3.9,"petal_width":1.2,"sepal_length":5.8,"sepal_width":2.7,"species":"Iris-versicolor"},{"petal_length":4.0,"petal_width":1.3,"sepal_length":5.5,"sepal_width":2.3,"species":"Iris-versicolor"},{"petal_length":4.5,"petal_width":1.3,"sepal_length":5.7,"sepal_width":2.8,"species":"Iris-versicolor"},{"petal_length":1.4,"petal_width":0.1,"sepal_length":4.8,"sepal_width":3.0,"species":"Iris-setosa"},{"petal_length":5.7,"petal_width":2.1,"sepal_length":6.7,"sepal_width":3.3,"species":"Iris-virginica"},{"petal_length":4.2,"petal_width":1.3,"sepal_length":5.6,"sepal_width":2.7,"species":"Iris-versicolor"},{"petal_length":1.1,"petal_width":0.1,"sepal_length":4.3,"sepal_width":3.0,"species":"Iris-setosa"},{"petal_length":3.3,"petal_width":1.0,"sepal_length":5.0,"sepal_width":2.3,"species":"Iris-versicolor"},{"petal_length":4.5,"petal_width":1.5,"sepal_length":5.6,"sepal_width":3.0,"species":"Iris-versicolor"},{"petal_length":6.6,"petal_width":2.1,"sepal_length":7.6,"sepal_width":3.0,"species":"Iris-virginica"},{"petal_length":5.6,"petal_width":2.4,"sepal_length":6.3,"sepal_width":3.4,"species":"Iris-virginica"},{"petal_length":1.3,"petal_width":0.2,"sepal_length":4.4,"sepal_width":3.0,"species":"Iris-setosa"},{"petal_length":1.4,"petal_width":0.3,"sepal_length":4.8,"sepal_width":3.0,"species":"Iris-setosa"},{"petal_length":5.6,"petal_width":1.4,"sepal_length":6.1,"sepal_width":2.6,"species":"Iris-virginica"},{"petal_length":4.4,"petal_width":1.4,"sepal_length":6.6,"sepal_width":3.0,"species":"Iris-versicolor"},{"petal_length":1.4,"petal_width":0.2,"sepal_length":5.1,"sepal_width":3.5,"species":"Iris-setosa"},{"petal_length":1.4,"petal_width":0.3,"sepal_length":4.6,"sepal_width":3.4,"species":"Iris-setosa"},{"petal_length":1.2,"petal_width":0.2,"sepal_length":5.0,"sepal_width":3.2,"species":"Iris-setosa"},{"petal_length":4.2,"petal_width":1.3,"sepal_length":5.7,"sepal_width":2.9,"species":"Iris-versicolor"},{"petal_length":5.1,"petal_width":1.6,"sepal_length":6.0,"sepal_width":2.7,"species":"Iris-versicolor"},{"petal_length":1.6,"petal_width":0.2,"sepal_length":4.8,"sepal_width":3.1,"species":"Iris-setosa"},{"petal_length":5.2,"petal_width":2.3,"sepal_length":6.7,"sepal_width":3.0,"species":"Iris-virginica"},{"petal_length":1.5,"petal_width":0.2,"sepal_length":5.3,"sepal_width":3.7,"species":"Iris-setosa"},{"petal_length":1.6,"petal_width":0.2,"sepal_length":5.1,"sepal_width":3.8,"species":"Iris-setosa"},{"petal_length":1.5,"petal_width":0.1,"sepal_length":4.9,"sepal_width":3.1,"species":"Iris-setosa"},{"petal_length":1.5,"petal_width":0.4,"sepal_length":5.7,"sepal_width":4.4,"species":"Iris-setosa"},{"petal_length":1.6,"petal_width":0.4,"sepal_length":5.0,"sepal_width":3.4,"species":"Iris-setosa"},{"petal_length":1.4,"petal_width":0.2,"sepal_length":4.6,"sepal_width":3.2,"species":"Iris-setosa"},{"petal_length":1.4,"petal_width":0.3,"sepal_length":5.1,"sepal_width":3.5,"species":"Iris-setosa"},{"petal_length":1.6,"petal_width":0.2,"sepal_length":4.7,"sepal_width":3.2,"species":"Iris-setosa"},{"petal_length":4.5,"petal_width":1.6,"sepal_length":6.0,"sepal_width":3.4,"species":"Iris-versicolor"},{"petal_length":6.0,"petal_width":2.5,"sepal_length":6.3,"sepal_width":3.3,"species":"Iris-virginica"},{"petal_length":5.5,"petal_width":1.8,"sepal_length":6.5,"sepal_width":3.0,"species":"Iris-virginica"},{"petal_length":4.7,"petal_width":1.4,"sepal_length":7.0,"sepal_width":3.2,"species":"Iris-versicolor"}]},"encoding":{"color":{"field":"species","type":"nominal"},"shape":{"field":"species","type":"nominal"},"x":{"field":"petal_width","title":"Petal Width","type":"quantitative"},"y":{"field":"petal_length","title":"Petal Length","type":"quantitative"}},"height":600,"mark":"point","title":{"text":"Petal Size Comparisons"},"width":600}
+```
+
+## Classification
+
+```elixir
+model = KNN.fit(train_x, train_y, num_classes: 3, num_neighbors: 3)
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+%Scholar.Neighbors.KNearestNeighbors{
+  data: #Nx.Tensor<
+    f64[120][4]
+    EXLA.Backend<host:0, 0.3752721453.2026242072.82172>
+    [
+      [5.8, 4.0, 1.2, 0.2],
+      [5.8, 2.8, 5.1, 2.4],
+      [4.9, 2.5, 4.5, 1.7],
+      [6.2, 2.2, 4.5, 1.5],
+      [7.2, 3.2, 6.0, 1.8],
+      [6.5, 3.0, 5.2, 2.0],
+      [6.3, 2.5, 4.9, 1.5],
+      [5.5, 2.4, 3.8, 1.1],
+      [5.2, 4.1, 1.5, 0.1],
+      [6.3, 2.3, 4.4, 1.3],
+      [6.8, 2.8, 4.8, 1.4],
+      [5.5, 2.6, 4.4, 1.2],
+      [6.4, ...],
+      ...
+    ]
+  >,
+  labels: #Nx.Tensor<
+    s64[120]
+    EXLA.Backend<host:0, 0.3752721453.2026242072.82174>
+    [0, 1, 1, 2, 1, 1, 2, 2, 0, 2, 2, 2, 2, 1, 1, 1, 0, 0, 0, 1, 2, 1, 1, 0, 2, 2, 1, 1, 2, 0, 1, 0, 1, 2, 2, 0, 2, 2, 1, 0, 2, 0, 2, 0, 1, 2, 0, 2, ...]
+  >,
+  default_num_neighbors: 3,
+  weights: :uniform,
+  num_classes: 3,
+  task: :classification,
+  metric: {:minkowski, 2}
+}
+```
+
+```elixir
+predictions = KNN.predict(model, test_x)
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+#Nx.Tensor<
+  s64[30]
+  EXLA.Backend<host:0, 0.3752721453.2026242072.82487>
+  [2, 1, 1, 0, 0, 1, 2, 1, 2, 2, 1, 0, 1, 0, 1, 1, 2, 1, 1, 1, 1, 0, 0, 1, 2, 1, 0, 0, 2, 0]
+>
+```
+
+## Evaluation - Classification
+
+```elixir
+df_pred = DF.put(df_test, "prediction", predictions)
+
+VL.new(title: [text: "Prediction Verification"], height: 600, width: 600, anchor: :middle)
+|> VL.data_from_values(df_pred)
+|> VL.mark(:point)
+|> VL.encode_field(:x, "petal_width", type: :quantitative, title: "Petal Width")
+|> VL.encode_field(:y, "petal_length", type: :quantitative, title: "Petal Length")
+|> VL.encode_field(:color, "prediction", type: :nominal)
+|> VL.encode_field(:shape, "species", type: :nominal)
+```
+
+<!-- livebook:{"output":true} -->
+
+```vega-lite
+{"$schema":"https://vega.github.io/schema/vega-lite/v5.json","anchor":"middle","data":{"values":[{"petal_length":5.0,"petal_width":1.7,"prediction":2,"sepal_length":6.7,"sepal_width":3.0,"species":"Iris-versicolor"},{"petal_length":5.5,"petal_width":1.8,"prediction":1,"sepal_length":6.4,"sepal_width":3.1,"species":"Iris-virginica"},{"petal_length":5.1,"petal_width":1.9,"prediction":1,"sepal_length":5.8,"sepal_width":2.7,"species":"Iris-virginica"},{"petal_length":1.5,"petal_width":0.2,"prediction":0,"sepal_length":5.4,"sepal_width":3.7,"species":"Iris-setosa"},{"petal_length":1.4,"petal_width":0.2,"prediction":0,"sepal_length":5.2,"sepal_width":3.4,"species":"Iris-setosa"},{"petal_length":5.7,"petal_width":2.5,"prediction":1,"sepal_length":6.7,"sepal_width":3.3,"species":"Iris-virginica"},{"petal_length":4.3,"petal_width":1.3,"prediction":2,"sepal_length":6.2,"sepal_width":2.9,"species":"Iris-versicolor"},{"petal_length":6.3,"petal_width":1.8,"prediction":1,"sepal_length":7.3,"sepal_width":2.9,"species":"Iris-virginica"},{"petal_length":4.7,"petal_width":1.4,"prediction":2,"sepal_length":6.1,"sepal_width":2.9,"species":"Iris-versicolor"},{"petal_length":3.0,"petal_width":1.1,"prediction":2,"sepal_length":5.1,"sepal_width":2.5,"species":"Iris-versicolor"},{"petal_length":5.1,"petal_width":1.9,"prediction":1,"sepal_length":5.8,"sepal_width":2.7,"species":"Iris-virginica"},{"petal_length":1.3,"petal_width":0.4,"prediction":0,"sepal_length":5.4,"sepal_width":3.9,"species":"Iris-setosa"},{"petal_length":5.0,"petal_width":1.9,"prediction":1,"sepal_length":6.3,"sepal_width":2.5,"species":"Iris-virginica"},{"petal_length":1.4,"petal_width":0.2,"prediction":0,"sepal_length":4.4,"sepal_width":2.9,"species":"Iris-setosa"},{"petal_length":5.3,"petal_width":1.9,"prediction":1,"sepal_length":6.4,"sepal_width":2.7,"species":"Iris-virginica"},{"petal_length":6.4,"petal_width":2.0,"prediction":1,"sepal_length":7.9,"sepal_width":3.8,"species":"Iris-virginica"},{"petal_length":4.1,"petal_width":1.0,"prediction":2,"sepal_length":5.8,"sepal_width":2.7,"species":"Iris-versicolor"},{"petal_length":6.1,"petal_width":2.3,"prediction":1,"sepal_length":7.7,"sepal_width":3.0,"species":"Iris-virginica"},{"petal_length":5.8,"petal_width":1.6,"prediction":1,"sepal_length":7.2,"sepal_width":3.0,"species":"Iris-virginica"},{"petal_length":5.1,"petal_width":2.3,"prediction":1,"sepal_length":6.9,"sepal_width":3.1,"species":"Iris-virginica"},{"petal_length":4.8,"petal_width":1.8,"prediction":1,"sepal_length":5.9,"sepal_width":3.2,"species":"Iris-versicolor"},{"petal_length":1.5,"petal_width":0.2,"prediction":0,"sepal_length":5.1,"sepal_width":3.4,"species":"Iris-setosa"},{"petal_length":1.4,"petal_width":0.2,"prediction":0,"sepal_length":5.0,"sepal_width":3.3,"species":"Iris-setosa"},{"petal_length":5.6,"petal_width":2.1,"prediction":1,"sepal_length":6.4,"sepal_width":2.8,"species":"Iris-virginica"},{"petal_length":4.7,"petal_width":1.5,"prediction":2,"sepal_length":6.7,"sepal_width":3.1,"species":"Iris-versicolor"},{"petal_length":5.8,"petal_width":1.8,"prediction":1,"sepal_length":6.7,"sepal_width":2.5,"species":"Iris-virginica"},{"petal_length":1.3,"petal_width":0.2,"prediction":0,"sepal_length":4.4,"sepal_width":3.2,"species":"Iris-setosa"},{"petal_length":1.5,"petal_width":0.1,"prediction":0,"sepal_length":4.9,"sepal_width":3.1,"species":"Iris-setosa"},{"petal_length":3.9,"petal_width":1.1,"prediction":2,"sepal_length":5.6,"sepal_width":2.5,"species":"Iris-versicolor"},{"petal_length":1.4,"petal_width":0.2,"prediction":0,"sepal_length":4.9,"sepal_width":3.0,"species":"Iris-setosa"}]},"encoding":{"color":{"field":"prediction","type":"nominal"},"shape":{"field":"species","type":"nominal"},"x":{"field":"petal_width","title":"Petal Width","type":"quantitative"},"y":{"field":"petal_length","title":"Petal Length","type":"quantitative"}},"height":600,"mark":"point","title":{"text":"Prediction Verification"},"width":600}
+```
+
+```elixir
+Classification.accuracy(test_y, predictions)
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+#Nx.Tensor<
+  f32
+  EXLA.Backend<host:0, 0.3752721453.2026242072.82518>
+  0.9666666388511658
+>
+```
+
+## Data Exploration - Regression
+
+```elixir
+file_input = Kino.Input.file("Choose CSV")
+```
+
+```elixir
+# Split into train and test datasets
+df =
+  file_input
+  |> Kino.Input.read()
+  |> Map.get(:file_ref)
+  |> Kino.Input.file_path()
+  |> DF.from_csv!()
+
+df =
+  DF.rename(df,
+    SquareFeet: "square_feet",
+    Bedrooms: "bedrooms",
+    Bathrooms: "bathrooms",
+    Neighborhood: "neighborhood",
+    YearBuilt: "year_built",
+    Price: "price"
+  )
+
+train_portion = ceil(DF.n_rows(df) * 0.8)
+df_train = DF.head(df, train_portion)
+df_test = DF.tail(df, DF.n_rows(df) - train_portion)
+neighborhoods = DF.dummies(df, "neighborhood")
+df = DF.concat_columns([df, neighborhoods])
+
+x =
+  df
+  |> DF.discard(~w(price neighborhood))
+  |> Nx.stack(axis: 1)
+
+y = Nx.stack(df[["price"]], axis: 1)
+
+{train_x, test_x} = Nx.split(x, train_portion)
+{train_y, test_y} = Nx.split(y, train_portion)
+
+df
+```
+
+<!-- livebook:{"output":true} -->
+
+```text
+#Explorer.DataFrame<
+  Polars[50000 x 9]
+  square_feet integer [2126, 2459, 1860, 2294, 2130, ...]
+  bedrooms integer [4, 3, 2, 2, 5, ...]
+  bathrooms integer [1, 2, 1, 1, 2, ...]
+  neighborhood string ["Rural", "Rural", "Suburb", "Urban", "Suburb", ...]
+  year_built integer [1969, 1980, 1970, 1996, 2001, ...]
+  price f64 [215355.28361820139, 195014.22162584803, 306891.0120763329, 206786.78715332696, 272436.239065061, ...]
+  neighborhood_Rural integer [1, 1, 0, 0, 0, ...]
+  neighborhood_Suburb integer [0, 0, 1, 0, 1, ...]
+  neighborhood_Urban integer [0, 0, 0, 1, 0, ...]
+>
+```
+
+```elixir
+df_train
+|> DF.group_by("year_built")
+|> DF.summarise(
+  bathrooms: mean(bathrooms),
+  bedrooms: mean(bedrooms),
+  square_feet: mean(square_feet),
+  price: median(price)
+)
+```
+
+<!-- livebook:{"output":true} -->
+
+```text
+#Explorer.DataFrame<
+  Polars[72 x 5]
+  year_built integer [1969, 1980, 1970, 1996, 2001, ...]
+  bathrooms f64 [1.9702048417132216, 1.9686924493554327, 2.060390763765542, 1.9676258992805755, 1.9865125240847785, ...]
+  bedrooms f64 [3.458100558659218, 3.445672191528545, 3.403197158081705, 3.602517985611511, 3.4527938342967244, ...]
+  square_feet f64 [1974.4990689013036, 2050.874769797422, 1961.5417406749557, 2025.7841726618706, 1998.1734104046243, ...]
+  price f64 [221758.7510975952, 228594.4140650267, 216166.52177549832, 222217.50391404334, 224677.76635035287, ...]
+>
+```
+
+## Regression
+
+```elixir
+model = KNN.fit(train_x, train_y, num_classes: 3, num_neighbors: 3, task: :regression)
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+%Scholar.Neighbors.KNearestNeighbors{
+  data: #Nx.Tensor<
+    s64[40000][7]
+    EXLA.Backend<host:0, 0.3752721453.2026242072.82921>
+    [
+      [2126, 4, 1, 1969, 1, 0, 0],
+      [2459, 3, 2, 1980, 1, 0, 0],
+      [1860, 2, 1, 1970, 0, 1, 0],
+      [2294, 2, 1, 1996, 0, 0, 1],
+      [2130, 5, 2, 2001, 0, 1, 0],
+      [2095, 2, 3, 2020, 0, 1, 0],
+      [2724, 2, 1, 1993, 0, 1, 0],
+      ...
+    ]
+  >,
+  labels: #Nx.Tensor<
+    f64[40000][1]
+    EXLA.Backend<host:0, 0.3752721453.2026242072.82923>
+    [
+      [215355.28361820139],
+      [195014.22162584803],
+      [306891.0120763329],
+      [206786.78715332696],
+      [272436.239065061],
+      [198208.80390657106],
+      [343429.3191099182],
+      [184992.321268412],
+      [377998.58815204125],
+      [95961.92601406391],
+      [191113.76867886042],
+      [253358.64500167352],
+      [132172.3926169813],
+      [231157.02767588635],
+      [118393.82316264397],
+      [267377.3996858498],
+      [190773.14856300573],
+      [172989.80490101498],
+      [239222.66779695038],
+      [143050.20178240185],
+      [405523.82831733953],
+      [263954.15406277135],
+      [148310.62016790514],
+      [151733.92248999208],
+      [307961.10738239513],
+      [276162.86180465267],
+      [243985.2054715822],
+      [88030.54185271678],
+      [282908.98169371625],
+      [240976.55176671062],
+      [104747.33458904951],
+      [347207.38956128363],
+      [77493.9314389322],
+      [331851.0816694101],
+      [110408.67080143407],
+      [127932.75677961827],
+      [228683.22699618756],
+      [124711.70785494654],
+      [415850.77083678055],
+      [184819.96119001514],
+      [164855.98777549056],
+      [156928.01471681413],
+      [282457.8613741379],
+      [287591.6728221959],
+      [156313.5941951282],
+      [279764.3710402287],
+      [366494.48060208897],
+      [244539.28168903317],
+      ...
+    ]
+  >,
+  default_num_neighbors: 3,
+  weights: :uniform,
+  num_classes: 3,
+  task: :regression,
+  metric: {:minkowski, 2}
+}
+```
+
+```elixir
+predictions = KNN.predict(model, test_x)
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+#Nx.Tensor<
+  f64[10000][1]
+  EXLA.Backend<host:0, 0.3752721453.2026242065.82205>
+  [
+    [226373.9807993843],
+    [183915.94593704157],
+    [183180.09138104858],
+    [212875.8215894591],
+    [190173.12866427167],
+    [236196.48192151205],
+    [191265.73326971615],
+    [211868.1438984828],
+    [285944.72421994776],
+    [292179.7714167268],
+    [135850.84540173528],
+    [170355.0694662646],
+    [245781.42715731516],
+    [332762.16565358033],
+    [218778.89671249516],
+    [278597.5767179295],
+    [137111.53295960717],
+    [222939.45174795808],
+    [346537.8395541983],
+    [274461.096041744],
+    [308123.83451235044],
+    [154487.07154281452],
+    [230564.8925299188],
+    [209643.65583746892],
+    [171856.3829574409],
+    [222375.53700887578],
+    [184989.23650707747],
+    [257232.0068392614],
+    [266728.27458831324],
+    [135307.8737726426],
+    [286752.6754042516],
+    [278532.3477017124],
+    [146663.38599155258],
+    [143760.42672523172],
+    [217642.40187830463],
+    [239256.34190318538],
+    [214894.75755024832],
+    [143360.16418437145],
+    [290998.1990680697],
+    [166314.0409957024],
+    [348214.14531584276],
+    [329513.4915151199],
+    [298984.1640842976],
+    [301549.31636405794],
+    [193079.5165821925],
+    [173499.1817696606],
+    [231942.86135317638],
+    [94320.87884601638],
+    [250972.33804283806],
+    [169602.52992067536],
+    ...
+  ]
+>
+```
+
+## Evaluation - Regression
+
+```elixir
+Regression.mean_square_error(test_y, predictions)
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+#Nx.Tensor<
+  f64
+  EXLA.Backend<host:0, 0.3752721453.2026242068.82314>
+  3353824360.183254
+>
+```
+
+```elixir
+Regression.mean_absolute_percentage_error(test_y, predictions)
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+#Nx.Tensor<
+  f64
+  EXLA.Backend<host:0, 0.3752721453.2026242067.82347>
+  0.33527562741283073
+>
+```
